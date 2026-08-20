@@ -197,8 +197,24 @@ def main() -> int:
     if unknown:
         raise RuntimeError(f"Неизвестные города: {', '.join(unknown)}")
 
-    html = load_html()
-    current = parse_table(html, cities, visa_type)
+    try:
+        html = load_html()
+        current = parse_table(html, cities, visa_type)
+    except Exception as exc:
+        message = (
+            "⚠️ Проверка временно не получила официальную таблицу\n\n"
+            f"Причина: {exc}\n\n"
+            "Это не ошибка токена и не ошибка Telegram. Такое бывает, когда официальный сайт "
+            "Госдепартамента временно не отдаёт таблицу GitHub-серверу или меняет структуру страницы.\n\n"
+            "Бот ничего не бронирует и не обходит личный кабинет. Просто попробуйте запустить workflow позже "
+            "или дождитесь следующей автоматической проверки. Компьютер для этого держать включённым не нужно."
+            f"\n\nИсточник: {URL}"
+        )
+        if send_status:
+            send_message(token, chat_id, message)
+        print(message)
+        return 0
+
     previous = load_state()
     new_state = dict(previous)
     alerts: list[str] = []
