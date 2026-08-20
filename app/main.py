@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import date
 from typing import Optional
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -19,6 +20,7 @@ router = Router()
 db: Optional[Database] = None
 bot: Optional[Bot] = None
 pending: dict[int, dict[str, str]] = {}
+search_horizon_months: int = 36
 
 
 def kb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
@@ -41,6 +43,28 @@ def format_wait(months: Optional[float], raw: str) -> str:
     return "меньше 0.5 месяца" if months < 0.5 else f"{months:g} мес."
 
 
+
+def approximate_date(months: Optional[float]) -> str:
+    if months is None:
+        return "неизвестно"
+    whole_months = max(0, int(round(months)))
+    today = date.today()
+    total = today.year * 12 + (today.month - 1) + whole_months
+    year, month_index = divmod(total, 12)
+    month_names = (
+        "январь", "февраль", "март", "апрель", "май", "июнь",
+        "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
+    )
+    return f"{month_names[month_index]} {year} года"
+
+
+def horizon_note(months: Optional[float]) -> str:
+    if months is None:
+        return "Горизонт: определить невозможно"
+    if months <= search_horizon_months:
+        return f"✅ Входит в горизонт {search_horizon_months} мес."
+    return f"⏳ Дальше выбранного горизонта {search_horizon_months} мес."
+
 def safe_note() -> str:
     return (
         "\n\n⚠️ Это не подтверждение конкретного свободного дня. "
@@ -53,7 +77,7 @@ def safe_note() -> str:
 async def start(message: Message) -> None:
     await message.answer(
         "👋 Визовый помощник США\n\n"
-        "Отслеживает публичные данные по Казахстану, Польше и Армении. "
+        f"Отслеживает публичные данные по Казахстану, Польше и Армении на горизонте до {search_horizon_months} месяцев. "
         "Не входит в аккаунт, не хранит пароль, не обходит CAPTCHA и не бронирует автоматически.\n\n"
         "Выберите действие:", reply_markup=main_menu()
     )
@@ -92,9 +116,13 @@ async def choose_visa(call: CallbackQuery) -> None:
     visa = call.data.split(":", 1)[1]
     data = pending.setdefault(call.from_user.id, {})
     data["visa"] = visa
-    rows = [[(f"≤ {value} мес.", f"target:{value}") for value in (0.5, 1, 2)],
-            [("≤ 3 мес.", "target:3"), ("≤ 6 мес.", "target:6")],
-            [("⬅️ Назад", "menu:add")]]
+    rows = [
+        [("≤ 1 мес.", "target:1"), ("≤ 2 мес.", "target:2")],
+        [("≤ 3 мес.", "target:3"), ("≤ 6 мес.", "target:6")],
+        [("≤ 12 мес.", "target:12"), ("≤ 24 мес.", "target:24")],
+        [("≤ 36 мес.", "target:36")],
+        [("⬅️ Назад", "menu:add")],
+    ]
     await call.message.edit_text(
         f"{data.get('city')} — {VISA_TYPES[visa]}\n"
         "При каком ожидании прислать уведомление?",
@@ -134,7 +162,11 @@ async def status_lines(user_id: int) -> str:
             value = format_wait(wait.months, wait.raw_value)
         except Exception:
             value = "данные временно недоступны"
-        lines.append(f"{i}. {sub.city} — {VISA_TYPES[sub.visa_type]}\n   Сейчас: {value}; уведомление: ≤ {sub.target_months:g} мес.")
+        lines.append(
+            f"{i}. {sub.city} — {VISA_TYPES[sub.visa_type]}\n"
+            f"   Сейчас: {value}; ориентировочно: {approximate_date(wait.months)}\n"
+            f"   {horizon_note(wait.months)}; срочное уведомление: ≤ {sub.target_months:g} мес."
+        )
     return "\n\n".join(lines) + safe_note()
 
 
@@ -180,7 +212,7 @@ async def info(call: CallbackQuery) -> None:
     await call.message.edit_text(
         "ℹ️ Бот читает публичную таблицу Global Visa Wait Times Госдепартамента США. "
         "Она показывает ориентировочный срок до следующей записи, а не конкретный календарный слот.\n\n"
-        "Когда показатель уменьшается или достигает вашего порога, бот присылает сигнал. "
+        f"Бот учитывает результаты в пределах {search_horizon_months} месяцев. Когда показатель уменьшается или достигает вашего срочного порога, бот присылает сигнал. "
         "После этого вы самостоятельно входите в официальный кабинет и проверяете календарь.\n\n"
         f"Источник: {WAIT_TIMES_URL}{safe_note()}",
         reply_markup=main_menu(), disable_web_page_preview=True,
@@ -216,16 +248,20 @@ async def scheduled_check() -> None:
             if months is None:
                 await db.update_seen(sub, None)
                 continue
+            within_horizon = months <= search_horizon_months
             improved = sub.last_seen_months is not None and months < sub.last_seen_months
             reached = months <= sub.target_months
             duplicate = sub.last_alert_months is not None and months == sub.last_alert_months
-            should_alert = (improved or reached) and not duplicate
+            should_alert = within_horizon and (improved or reached) and not duplicate
             if should_alert:
                 reason = "показатель достиг вашего порога" if reached else "официальное ожидание уменьшилось"
                 await bot.send_message(
                     sub.telegram_id,
                     f"🔔 {reason}!\n\n📍 {wait.country}, {wait.city}\n🎫 {wait.label}\n"
-                    f"Сейчас: {format_wait(months, wait.raw_value)}\nВаш порог: ≤ {sub.target_months:g} мес.\n\n"
+                    f"Сейчас: {format_wait(months, wait.raw_value)}\n"
+                    f"Ориентировочная дата: {approximate_date(months)}\n"
+                    f"Горизонт поиска: до {search_horizon_months} мес.\n"
+                    f"Ваш срочный порог: ≤ {sub.target_months:g} мес.\n\n"
                     "Зайдите в официальный визовый кабинет и вручную проверьте календарь."
                     f"{safe_note()}\n\nИсточник: {WAIT_TIMES_URL}",
                     disable_web_page_preview=True,
@@ -236,8 +272,9 @@ async def scheduled_check() -> None:
 
 
 async def main() -> None:
-    global db, bot
+    global db, bot, search_horizon_months
     settings = load_settings()
+    search_horizon_months = settings.search_horizon_months
     db = Database(settings.db_path)
     await db.init()
     bot = Bot(settings.bot_token)

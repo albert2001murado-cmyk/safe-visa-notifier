@@ -10,6 +10,7 @@ class Settings:
     bot_token: str
     db_path: str = "visa_bot.sqlite3"
     check_interval_minutes: int = 360
+    search_horizon_months: int = 36
 
 
 def load_settings() -> Settings:
@@ -23,8 +24,15 @@ def load_settings() -> Settings:
     except ValueError:
         interval = 360
 
+    horizon_raw = os.getenv("SEARCH_HORIZON_MONTHS", "36").strip()
+    try:
+        horizon = min(36, max(1, int(horizon_raw)))
+    except ValueError:
+        horizon = 36
+
     return Settings(
         bot_token=token,
         db_path=os.getenv("DB_PATH", "visa_bot.sqlite3"),
         check_interval_minutes=interval,
+        search_horizon_months=horizon,
     )
